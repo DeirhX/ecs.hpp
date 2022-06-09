@@ -280,8 +280,14 @@ namespace ecs_hpp::detail
         incremental_locker() = default;
         ~incremental_locker() noexcept = default;
 
-        incremental_locker(incremental_locker&& other) noexcept = default;
-        incremental_locker(const incremental_locker& other) noexcept = default;
+        incremental_locker(incremental_locker && other) noexcept
+        {
+            this->lock_count_.store(other.lock_count_);
+        }
+        incremental_locker(const incremental_locker & other) noexcept
+        {
+            this->lock_count_.store(other.lock_count_);
+        };
 
         incremental_locker& operator=(incremental_locker&& other) noexcept {
             assert(!is_locked());
@@ -308,7 +314,7 @@ namespace ecs_hpp::detail
             return !!lock_count_;
         }
     private:
-        std::size_t lock_count_{0u};
+        std::atomic<std::size_t> lock_count_{0u};
     };
 
     class incremental_lock_guard final {
