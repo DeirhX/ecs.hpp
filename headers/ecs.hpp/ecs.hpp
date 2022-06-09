@@ -282,11 +282,11 @@ namespace ecs_hpp::detail
 
         incremental_locker(incremental_locker && other) noexcept
         {
-            this->lock_count_.store(other.lock_count_);
+            assert(!is_locked());
         }
         incremental_locker(const incremental_locker & other) noexcept
         {
-            this->lock_count_.store(other.lock_count_);
+            assert(!is_locked());
         };
 
         incremental_locker& operator=(incremental_locker&& other) noexcept {
