@@ -21,6 +21,9 @@
 #include <functional>
 #include <type_traits>
 #include <shared_mutex>
+#include <mutex>
+
+
 
 // -----------------------------------------------------------------------------
 //
@@ -1385,6 +1388,29 @@ namespace ecs_hpp
             entity_id id_{0u};
             const registry* owner_{nullptr};
         };
+
+        class mutexes
+        {
+        public:
+            mutable std::shared_mutex entity_ids_locker_;
+            mutable std::shared_mutex features_locker_;
+
+            mutexes() = default;
+            mutexes(const mutexes& other) = delete;
+            mutexes & operator=(const mutexes & other) = delete;
+            mutexes(mutexes && other) noexcept
+            {
+                // Wait until no more usages are pending
+                std::scoped_lock lock(other.entity_ids_locker_, other.features_locker_, this->entity_ids_locker_, this->entity_ids_locker_);
+            }
+            mutexes & operator=(mutexes && other) noexcept
+            {
+                // Wait until no more usages are pending
+                std::scoped_lock lock(other.entity_ids_locker_, other.features_locker_, this->entity_ids_locker_,
+                                      this->entity_ids_locker_);
+                return *this;
+            }
+        };
     public:
         registry() = default;
 
@@ -1575,14 +1601,16 @@ namespace ecs_hpp
         entity_id last_entity_id_{0u};
         std::vector<entity_id> free_entity_ids_;
 
-        mutable std::shared_mutex entity_ids_locker_;
+        /* protected by mutexes.entity_ids_mutex */
         detail::sparse_set<entity_id, detail::entity_id_indexer> entity_ids_;
 
         using storage_uptr = std::unique_ptr<detail::component_storage_base>;
         detail::sparse_map<family_id, storage_uptr> storages_;
 
-        mutable std::shared_mutex features_locker_;
+        /* protected by mutexes.features_mutex */
         detail::sparse_map<family_id, feature> features_;
+
+        mutable mutexes mutexes_;
     };
 }
 
@@ -2589,7 +2617,7 @@ namespace ecs_hpp
     }
 
     inline entity registry::create_entity() {
-        std::unique_lock lock(entity_ids_locker_);
+        std::unique_lock lock(mutexes_.entity_ids_locker_);
         if ( !free_entity_ids_.empty() ) {
             const auto free_ent_id = free_entity_ids_.back();
             const auto new_ent_id = detail::upgrade_entity_id(free_ent_id);
@@ -2638,7 +2666,7 @@ namespace ecs_hpp
     }
 
     inline void registry::destroy_entity(const uentity& ent) noexcept {
-        std::unique_lock lock(entity_ids_locker_);
+        std::unique_lock lock(mutexes_.entity_ids_locker_);
         assert(valid_entity(ent));
         remove_all_components(ent);
         if ( entity_ids_.unordered_erase(ent) ) {
@@ -2794,7 +2822,7 @@ namespace ecs_hpp
 
     template < typename F, typename... Opts >
     void registry::for_each_entity(F&& f, Opts&&... opts) {
-        std::unique_lock lock(entity_ids_locker_);
+        std::unique_lock lock(mutexes_.entity_ids_locker_);
         for ( const auto e : entity_ids_ ) {
             if ( uentity ent{*this, e}; (... && opts(ent)) ) {
                 f(ent);
@@ -2804,7 +2832,7 @@ namespace ecs_hpp
 
     template < typename F, typename... Opts >
     void registry::for_each_entity(F&& f, Opts&&... opts) const {
-        std::shared_lock lock(entity_ids_locker_);
+        std::shared_lock lock(mutexes_.entity_ids_locker_);
         for ( const auto e : entity_ids_ ) {
             if ( const_uentity ent{*this, e}; (... && opts(ent)) ) {
                 f(ent);
@@ -2853,7 +2881,7 @@ namespace ecs_hpp
     template < typename Tag, typename... Args >
     feature& registry::assign_feature(Args&&... args) {
         const auto feature_id = detail::type_family<Tag>::id();
-        std::unique_lock lock(features_locker_);
+        std::unique_lock lock(mutexes_.features_locker_);
         if (feature * f = features_.find(feature_id))
         {
             return *f = feature{std::forward<Args>(args)...};
@@ -2864,7 +2892,7 @@ namespace ecs_hpp
     template < typename Tag, typename... Args >
     feature& registry::ensure_feature(Args&&... args) {
         const auto feature_id = detail::type_family<Tag>::id();
-        std::unique_lock lock(features_locker_);
+        std::unique_lock lock(mutexes_.features_locker_);
         if (feature * f = features_.find(feature_id))
         {
             return *f;
@@ -2875,14 +2903,14 @@ namespace ecs_hpp
     template < typename Tag >
     bool registry::has_feature() const noexcept {
         const auto feature_id = detail::type_family<Tag>::id();
-        std::shared_lock lock(features_locker_);
+        std::shared_lock lock(mutexes_.features_locker_);
         return features_.has(feature_id);
     }
 
     template < typename Tag >
     feature& registry::get_feature() {
         const auto feature_id = detail::type_family<Tag>::id();
-        std::shared_lock lock(features_locker_);
+        std::shared_lock lock(mutexes_.features_locker_);
         if (feature * f = features_.find(feature_id))
         {
             return *f;
@@ -2893,7 +2921,7 @@ namespace ecs_hpp
     template < typename Tag >
     const feature& registry::get_feature() const {
         const auto feature_id = detail::type_family<Tag>::id();
-        std::shared_lock lock(features_locker_);
+        std::shared_lock lock(mutexes_.features_locker_);
         if ( const feature* f = features_.find(feature_id) ) {
             return *f;
         }
@@ -2902,7 +2930,7 @@ namespace ecs_hpp
 
     template < typename Event >
     registry& registry::process_event(const Event& event) {
-        std::shared_lock lock(features_locker_);
+        std::shared_lock lock(mutexes_.features_locker_);
         for (const auto family : features_)
         {
             if ( feature& f = features_.get(family); f.is_enabled() ) {
@@ -2914,7 +2942,7 @@ namespace ecs_hpp
 
     inline registry::memory_usage_info registry::memory_usage() const noexcept {
         memory_usage_info info;
-        std::shared_lock lock(features_locker_);
+        std::shared_lock lock(mutexes_.features_locker_);
         info.entities += free_entity_ids_.capacity() * sizeof(free_entity_ids_[0]);
         info.entities += entity_ids_.memory_usage();
         for ( const auto family : storages_ ) {
